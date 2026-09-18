@@ -25,7 +25,7 @@ export interface DestinationDiagnostic {
   chatTitle: string | null;
 }
 
-export const PRODUCTION_PUBLIC_DOMAIN = 'web-production-cbd4e.up.railway.app';
+export const PRODUCTION_PUBLIC_DOMAIN = 'web-production-15276.up.railway.app';
 export const STAGING_PUBLIC_DOMAIN = 'web-staging-361e.up.railway.app';
 export const KNOWN_PRODUCTION_BOT_ID = '8931758661';
 

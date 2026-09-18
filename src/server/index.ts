@@ -8369,11 +8369,24 @@ export async function startServer(port: number = 3000): Promise<{ app: express.A
     const botToken = process.env.TELEGRAM_BOT_TOKEN;
     if (botToken) {
       try {
+        const envDomain = TelegramEnvironmentService.getExpectedDomain(TelegramEnvironmentService.getAppEnvironment());
         const targetWebhookUrl = process.env.TELEGRAM_WEBHOOK_URL ||
-          (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/api/webhooks/telegram` : null);
+          (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/api/webhooks/telegram` : (envDomain ? `https://${envDomain}/api/webhooks/telegram` : null));
 
         if (targetWebhookUrl) {
-          const setRes = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook?url=${encodeURIComponent(targetWebhookUrl)}`);
+          const secretToken = process.env.TELEGRAM_WEBHOOK_SECRET;
+          const bodyPayload: any = {
+            url: targetWebhookUrl,
+            allowed_updates: ['message', 'edited_message', 'callback_query'],
+          };
+          if (secretToken && secretToken.trim() !== '') {
+            bodyPayload.secret_token = secretToken.trim();
+          }
+          const setRes = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(bodyPayload),
+          });
           const setData: any = await setRes.json();
           console.log(`[TELEGRAM SET_WEBHOOK RESULT] ok=${setData.ok} description="${setData.description || ''}" url="${targetWebhookUrl}"`);
         }
