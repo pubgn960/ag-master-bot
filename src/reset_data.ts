@@ -1,4 +1,4 @@
-import { getDb } from './core/db/index.ts';
+import { getDb } from './core/db';
 import * as dotenv from 'dotenv';
 dotenv.config();
 

@@ -16,7 +16,7 @@ import path from 'path';
 import fs from 'fs';
 import { GoogleGenAI } from '@google/genai';
 import { v4 as uuidv4 } from 'uuid';
-import { DatabaseClient, getDb, runMigrations } from '../core/db/index.ts';
+import { DatabaseClient, getDb, runMigrations } from '../core/db';
 import { AuditService } from '../core/services/AuditService.js';
 import { OrderService } from '../core/services/OrderService.js';
 import { PaymentService } from '../core/services/PaymentService.js';
@@ -44,7 +44,7 @@ import { MockAIAdapter } from '../core/adapters/ai/AIAdapter.js';
 import { MockExchangeAdapter, LiveExchangeAdapter, ExchangeAdapter } from '../core/adapters/exchange/ExchangeAdapter.js';
 import { MockStorageAdapter } from '../core/adapters/storage/StorageAdapter.js';
 import { AIExtractionService } from '../core/services/AIExtractionService.js';
-import { seedStagingData } from '../core/db/seedStaging.ts';
+import { seedStagingData } from '../core/db/seedStaging';
 import {
   DeterministicOrderParser,
   isIgnorableChatMessage,
@@ -62,7 +62,7 @@ import { shouldRouteToOrderParser } from '../bot/handlers/messageHandler.js';
 import { parseOrderHeuristic } from '../services/orderParser.js';
 import { RoutingEligibilityService } from '../core/services/RoutingEligibilityService.js';
 import { OrderFollowupService } from '../core/services/OrderFollowupService.js';
-import { ensureCanonicalConfig } from '../core/db/ensureCanonicalConfig.ts';
+import { ensureCanonicalConfig } from '../core/db/ensureCanonicalConfig';
 import { SafeMath } from '../core/services/SafeMath.js';
 import { TelegramEnvironmentService } from '../core/services/TelegramEnvironmentService.js';
 import { OrderPostCreateOrchestrator } from '../core/services/OrderPostCreateOrchestrator.js';

@@ -1,4 +1,4 @@
-import { getDb } from './core/db/index.ts';
+import { getDb } from './core/db';
 import { v4 as uuidv4 } from 'uuid';
 
 const groups = [

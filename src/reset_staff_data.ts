@@ -1,4 +1,4 @@
-import { getDb } from './core/db/index.ts';
+import { getDb } from './core/db';
 
 async function resetStaff() {
   console.log('[RESET] Starting staff data reset...');

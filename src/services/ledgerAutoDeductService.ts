@@ -1,4 +1,4 @@
-import { DatabaseClient } from '../core/db/index.ts';
+import { DatabaseClient } from '../core/db';
 import { TelegramAdapter } from '../core/adapters/telegram/TelegramAdapter.js';
 import { AuditService } from '../core/services/AuditService.js';
 import { v4 as uuidv4 } from 'uuid';

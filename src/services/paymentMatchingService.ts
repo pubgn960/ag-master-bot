@@ -1,4 +1,4 @@
-import type { DatabaseClient } from '../core/db/index.ts';
+import type { DatabaseClient } from '../core/db';
 
 export interface PaymentMatchResult {
   matched: boolean;
