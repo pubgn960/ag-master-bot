@@ -1,4 +1,4 @@
-import { DatabaseClient } from '../../core/db';
+import { DatabaseClient } from '../../core/db/index.js';
 import { TelegramAdapter } from '../../core/adapters/telegram/TelegramAdapter.js';
 import { LoaderDeliveryService } from '../../core/services/LoaderDeliveryService.js';
 import { OutboxProcessor } from '../../core/services/OutboxProcessor.js';

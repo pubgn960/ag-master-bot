@@ -1,4 +1,4 @@
-import { getDb } from './core/db';
+import { getDb } from './core/db/index.js';
 import { createServices } from './server/index.js';
 import { DeterministicOrderParser } from './core/services/DeterministicOrderParser.js';
 import * as dotenv from 'dotenv';

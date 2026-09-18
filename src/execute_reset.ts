@@ -1,4 +1,4 @@
-import { getDb } from './core/db';
+import { getDb } from './core/db/index.js';
 
 async function run() {
   const env = process.env.RAILWAY_ENVIRONMENT;

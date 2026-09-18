@@ -8,4 +8,4 @@ dist-server
 .DS_Store
 offline-export
 test_pgdata
-db
+.dbdata

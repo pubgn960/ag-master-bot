@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
-import { DatabaseClient, runMigrations } from '../../core/db';
+import { DatabaseClient, runMigrations } from '../../core/db/index.js';
 import { MockTelegramAdapter } from '../../core/adapters/telegram/TelegramAdapter.js';
 import { AuditService } from '../../core/services/AuditService.js';
 import { LoaderDeliveryService } from '../../core/services/LoaderDeliveryService.js';

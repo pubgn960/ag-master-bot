@@ -1,4 +1,4 @@
-import type { DatabaseClient } from '../core/db';
+import type { DatabaseClient } from '../core/db/index.js';
 
 export type PaymentSessionStatus = 'ACTIVE' | 'DEPLETED' | 'EXPIRED';
 

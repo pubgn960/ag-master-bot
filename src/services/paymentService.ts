@@ -1,4 +1,4 @@
-import { DatabaseClient } from '../core/db';
+import { DatabaseClient } from '../core/db/index.js';
 import { CustomerBalanceLedgerService } from '../core/services/CustomerBalanceLedgerService.js';
 import { AuditService } from '../core/services/AuditService.js';
 import { PaymentService as CorePaymentService } from '../core/services/PaymentService.js';

@@ -1,0 +1,2 @@
+ALTER TABLE telegram_groups ADD COLUMN IF NOT EXISTS is_broadcast_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE telegram_groups ADD COLUMN IF NOT EXISTS notification_enabled BOOLEAN NOT NULL DEFAULT TRUE;
