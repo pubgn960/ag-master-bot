@@ -1,0 +1,11 @@
+node_modules
+.pgdata
+dist
+dist-server
+.env
+.env.local
+*.log
+.DS_Store
+offline-export
+test_pgdata
+db

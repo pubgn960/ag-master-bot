@@ -1,0 +1,656 @@
+================================================================================
+CALCULATOR_WORKFLOW.txt
+iTech Avengers Bot Engine — Complete Calculator Session Workflow
+Generated: 2026-09-09T01:16:34+05:00
+================================================================================
+
+This file consolidates every file involved in the iTech Avengers Bot Engine calculator pipeline:
+  1. Database Schema (migrations)
+  2. SafeMath — pure math expression evaluator & shorthand detector
+  3. CalculatorService — session state engine (before / now / total)
+  4. CommandHandlerService — Telegram command dispatcher (/calc, /total, /undo, /reset, arithmetic shorthands)
+  5. CommandRegistry — registered calculator commands
+  6. server/index.ts — Telegram webhook router (arithmetic short-circuit logic)
+  7. Tests — CalculatorService.test.ts + webhook_arithmetic_shortcircuit.test.ts
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+  A. DATABASE SCHEMA
+     - src/core/db/migrations/007_calculator_state.sql
+     - src/core/db/migrations/010_calculator_sessions_user_key.sql
+
+  B. SAFE MATH ENGINE
+     - src/core/services/SafeMath.ts
+
+  C. CALCULATOR SESSION SERVICE
+     - src/core/services/CalculatorService.ts
+
+  D. COMMAND HANDLER SERVICE (calc-related excerpts)
+     - src/core/services/CommandHandlerService.ts
+
+  E. COMMAND REGISTRY (calculator commands)
+     - src/core/services/CommandRegistry.ts
+
+  F. WEBHOOK ROUTER — ARITHMETIC SHORT-CIRCUIT
+     - src/server/index.ts (arithmetic routing section, ~lines 3435–3485)
+     - src/server/index.ts (REST API /api/calculator/*, ~lines 2000–2012)
+
+  G. UNIT TESTS
+     - src/tests/unit/CalculatorService.test.ts
+     - src/tests/unit/webhook_arithmetic_shortcircuit.test.ts
+
+================================================================================
+WORKFLOW OVERVIEW
+================================================================================
+
+ENTRY POINTS:
+  1. Telegram message with arithmetic text (e.g. "+89", "78", "2+2", "-100")
+  2. Telegram command "/calc <expr>", "/total", "/undo", "/clearcalc", "/reset"
+  3. REST API POST /api/calculator/calculate  (Dashboard UI)
+  4. REST API POST /api/calculator/undo        (Dashboard UI)
+
+ROUTING DECISION (server/index.ts lines ~3435–3485):
+  ┌─ Message arrives from Telegram ─────────────────────────────────────────┐
+  │                                                                          │
+  │  isOrderMessage = shouldRouteToOrderParser(rawText)                     │
+  │   └─ TRUE if: starts with '#', contains email, has CP/order keywords    │
+  │                                                                          │
+  │  if (!isOrderMessage && rawText):                                        │
+  │    if rawText.startsWith('/')  ──────────────▶  candidateCmd = rawText  │
+  │    elif SafeMath.isArithmeticShorthand(rawText) && isOwnerOrStaff       │
+  │                              ──────────────▶  candidateCmd = rawText    │
+  │                                                                          │
+  │  if (!isOrderMessage && !isCommandOrCalc && rawCaption && isOwnerOrStaff)│
+  │    if rawCaption.startsWith('/') or isArithmetic(rawCaption)            │
+  │                              ──────────────▶  candidateCmd = rawCaption  │
+  │                                                                          │
+  │  → Dispatches to CommandHandlerService.handleCommand(...)               │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+COMMAND HANDLER (CommandHandlerService.ts):
+  - isCalcShortcut = SafeMath.isArithmeticShorthand(text) && !slash command
+  - Routes to /calc case with expr = text
+  - /calc     → calculatorService.processExpression(chatId, fromId, expr)
+  - /total    → calculatorService.getTotal(chatId, fromId)
+  - /undo     → calculatorService.undo(chatId, fromId)
+  - /clearcalc or /reset → calculatorService.clear(chatId, fromId)
+
+SESSION KEY STRATEGY:
+  - Session is keyed by the acting TELEGRAM USER ID (fromId / actorTelegramUserId)
+  - NOT by the group chat ID (negative number). This ensures each staff member's
+    running total is isolated, even if they type in different groups.
+  - resolveUserKey() tries normalizeTelegramId(userIdOrExpr) first, then groupId.
+  - DB: INSERT ... ON CONFLICT (session_key) DO UPDATE
+
+RESPONSE FORMAT (formatted string):
+  Normal operation:   "before：78\nnow：+67=67\ntotal：145"
+  Reset/clear:        "before：149\nnow：reset=0\ntotal：0"
+  Undo:               "↩️ Undo\nbefore：73\nremoved：69\ntotal：4"
+  /total:             "total：145"
+
+SESSION PERSISTENCE:
+  Table: calculator_sessions
+  Columns: id, group_id (nullable), session_key, total_value NUMERIC(15,2),
+           history JSONB (array of {operation, value, totalAfter}), last_updated_at
+  Unique: session_key (Telegram user ID)
+
+================================================================================
+A. DATABASE SCHEMA
+================================================================================
+
+── FILE: src/core/db/migrations/007_calculator_state.sql ──────────────────────
+
+BEGIN;
+
+CREATE TABLE calculator_sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id UUID REFERENCES telegram_groups(id) ON DELETE CASCADE,
+  session_key VARCHAR(128) NOT NULL,   -- e.g. telegram user id
+  total_value NUMERIC(15,2) DEFAULT 0,
+  history JSONB DEFAULT '[]'::jsonb,
+  last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(group_id, session_key)
+);
+
+COMMIT;
+
+── FILE: src/core/db/migrations/010_calculator_sessions_user_key.sql ──────────
+
+BEGIN;
+
+-- Ensure calculator_sessions can be keyed by session_key alone (acting Telegram user identity)
+ALTER TABLE calculator_sessions DROP CONSTRAINT IF EXISTS calculator_sessions_group_id_session_key_key;
+ALTER TABLE calculator_sessions ALTER COLUMN group_id DROP NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calc_sessions_user ON calculator_sessions(session_key);
+
+COMMIT;
+
+================================================================================
+B. SAFE MATH ENGINE
+================================================================================
+
+── FILE: src/core/services/SafeMath.ts ────────────────────────────────────────
+
+export class SafeMath {
+  /**
+   * Evaluates a pure arithmetic expression string.
+   * Supports: +, -, *, /, parentheses, decimals.
+   * No eval() — uses a recursive descent parser for safety.
+   */
+  static evaluate(expr: string): number {
+    expr = expr.replace(/\s+/g, '');
+    let pos = 0;
+
+    const parseNumber = (): number => {
+      let numStr = '';
+      if (expr[pos] === '-' || expr[pos] === '+') {
+        if (expr[pos] === '-') numStr += '-';
+        pos++;
+      }
+      while (pos < expr.length && (/[0-9.]/.test(expr[pos]))) {
+        numStr += expr[pos];
+        pos++;
+      }
+      if (!numStr || numStr === '-') throw new Error('Invalid number');
+      return parseFloat(numStr);
+    };
+
+    const parseFactor = (): number => {
+      if (expr[pos] === '(') {
+        pos++;
+        const val = parseExpression();
+        if (expr[pos] === ')') pos++;
+        else throw new Error('Mismatched parenthesis');
+        return val;
+      }
+      return parseNumber();
+    };
+
+    const parseTerm = (): number => {
+      let val = parseFactor();
+      while (pos < expr.length && (expr[pos] === '*' || expr[pos] === '/')) {
+        const op = expr[pos++];
+        const next = parseFactor();
+        if (op === '*') val *= next;
+        else val /= next;
+      }
+      return val;
+    };
+
+    const parseExpression = (): number => {
+      let val = parseTerm();
+      while (pos < expr.length && (expr[pos] === '+' || expr[pos] === '-')) {
+        const op = expr[pos++];
+        const next = parseTerm();
+        if (op === '+') val += next;
+        else val -= next;
+      }
+      return val;
+    };
+
+    const result = parseExpression();
+    if (pos < expr.length) {
+      throw new Error('Invalid expression trailing characters');
+    }
+    return result;
+  }
+
+  /**
+   * Determines if a text message is a valid arithmetic shorthand.
+   * Used to detect "+89", "-100", "78", "2+2", "5*4", "100/2", "74.5" etc.
+   * Returns false for slash commands, order text (e.g. "100 CP"), or invalid exprs.
+   */
+  static isArithmeticShorthand(text: string): boolean {
+    if (!text) return false;
+    const trimmed = text.trim();
+    if (trimmed.startsWith('/')) return false;
+    // Explicit shorthand: starts with operator followed by digit(s)
+    if (/^[+\-*/]\s*\d+(?:\.\d+)?\s*$/.test(trimmed)) return true;
+    // Plain number (e.g. "78", "74.5")
+    if (/^\d+(?:\.\d+)?$/.test(trimmed)) return true;
+    // Must be purely numeric/operator (rejects "100 CP", "hello", etc.)
+    if (!/^[0-9+\-*/().\s]+$/.test(trimmed)) return false;
+    // Must contain at least one operator
+    if (!/[+\-*/]/.test(trimmed)) return false;
+    try {
+      SafeMath.evaluate(trimmed);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+================================================================================
+C. CALCULATOR SESSION SERVICE
+================================================================================
+
+── FILE: src/core/services/CalculatorService.ts ───────────────────────────────
+
+import { DatabaseClient, getDb } from '../db/index.js';
+import { SafeMath } from './SafeMath.js';
+import { normalizeTelegramId } from './AuthService.js';
+
+export interface CalculatorSession {
+  groupId: string;
+  userId: string;
+  runningTotal: number;
+  history: Array<{ operation: string; value: number; totalAfter: number }>;
+}
+
+export class CalculatorService {
+  private db?: DatabaseClient;
+
+  constructor(db?: DatabaseClient) {
+    if (db) this.db = db;
+  }
+
+  setDb(db: DatabaseClient) {
+    this.db = db;
+  }
+
+  private async getDb(): Promise<DatabaseClient> {
+    if (!this.db) {
+      this.db = await getDb();
+    }
+    return this.db;
+  }
+
+  /**
+   * Resolves which Telegram ID to use as the session key.
+   * Prefers fromId (the user who sent the message) over the group chat ID.
+   * Prevents negative group chat IDs from being used as session keys.
+   */
+  private resolveUserKey(groupIdOrChat: string, userIdOrExpr?: string): string {
+    const cand1 = normalizeTelegramId(userIdOrExpr);
+    if (cand1) return cand1;
+    const cand2 = normalizeTelegramId(groupIdOrChat);
+    if (cand2) return cand2;
+    return userIdOrExpr || groupIdOrChat || 'global_calc';
+  }
+
+  private async getSession(userKey: string): Promise<CalculatorSession> {
+    const db = await this.getDb();
+    const res = await db.query(
+      'SELECT total_value, history FROM calculator_sessions WHERE session_key = ',
+      [userKey]
+    );
+    if (res.rows.length === 0) {
+      return { groupId: 'global', userId: userKey, runningTotal: 0, history: [] };
+    }
+    return {
+      groupId: 'global',
+      userId: userKey,
+      runningTotal: parseFloat(res.rows[0].total_value || '0'),
+      history: typeof res.rows[0].history === 'string'
+        ? JSON.parse(res.rows[0].history)
+        : (res.rows[0].history || []),
+    };
+  }
+
+  private async saveSession(session: CalculatorSession): Promise<void> {
+    const db = await this.getDb();
+    await db.query(
+      INSERT INTO calculator_sessions (session_key, total_value, history, last_updated_at)
+       VALUES (, , , CURRENT_TIMESTAMP)
+       ON CONFLICT (session_key) DO UPDATE SET
+         total_value = EXCLUDED.total_value,
+         history = EXCLUDED.history,
+         last_updated_at = CURRENT_TIMESTAMP,
+      [session.userId, session.runningTotal, JSON.stringify(session.history)]
+    );
+  }
+
+  private cleanNum(n: number): string {
+    return Number(Number(n.toFixed(4)).toPrecision(12)).toString();
+  }
+
+  /**
+   * Core method: processes a math expression relative to the user's running total.
+   *
+   * Supported expression forms:
+   *   "+89"       → adds 89 to running total
+   *   "-100"      → subtracts 100 from running total
+   *   "78"        → adds 78 to running total (treated as +78)
+   *   "2+2"       → evaluates 2+2=4, adds 4 to running total
+   *   "*2"        → multiplies running total by 2
+   *   "/3"        → divides running total by 3
+   *
+   * Returns:
+   *   before  — the running total BEFORE this operation
+   *   now     — string like "+89=89" or "+2+2=4"
+   *   total   — the running total AFTER this operation
+   *   formatted — 3-line string for Telegram reply:
+   *               "before：<before>\nnow：<now>\ntotal：<total>"
+   */
+  async processExpression(groupIdOrChat: string, userIdOrExpr: string, maybeExpr?: string): Promise<{
+    before: number;
+    now: string;
+    total: number;
+    formatted: string;
+    evalResult?: number;
+  }> {
+    let userKey: string;
+    let expr: string;
+
+    if (maybeExpr !== undefined) {
+      userKey = this.resolveUserKey(groupIdOrChat, userIdOrExpr);
+      expr = maybeExpr;
+    } else {
+      userKey = this.resolveUserKey(groupIdOrChat);
+      expr = userIdOrExpr;
+    }
+
+    const session = await this.getSession(userKey);
+    const before = session.runningTotal;
+    const trimmed = expr.trim();
+    const cleanExpr = trimmed.replace(/\s+/g, '');
+
+    let change = 0;
+    let evalVal = 0;
+    let normExpr = '';
+
+    if (/^[*/]/.test(cleanExpr)) {
+      // Scale operators: *N multiplies total, /N divides total
+      const op = cleanExpr[0];
+      const operand = SafeMath.evaluate(cleanExpr.slice(1));
+      const targetTotal = op === '*' ? before * operand : before / operand;
+      change = targetTotal - before;
+      evalVal = targetTotal;
+      normExpr = cleanExpr;
+    } else {
+      // Additive: evaluate the expression, add result to running total
+      evalVal = SafeMath.evaluate(cleanExpr);
+      change = evalVal;
+      normExpr = /^[+\-]/.test(cleanExpr) ? cleanExpr : +;
+    }
+
+    const newTotal = Number((before + change).toFixed(4));
+
+    session.history.push({
+      operation: normExpr,
+      value: change,
+      totalAfter: newTotal,
+    });
+    session.runningTotal = newTotal;
+    await this.saveSession(session);
+
+    const nowStr = ${normExpr}=;
+    const formatted = efore：\nnow：\ntotal：;
+
+    return { before, now: nowStr, total: newTotal, formatted, evalResult: evalVal };
+  }
+
+  /** Returns the current running total as a clean string. */
+  async getTotal(groupIdOrChat: string, maybeUserId?: string): Promise<string> {
+    const userKey = this.resolveUserKey(groupIdOrChat, maybeUserId);
+    const session = await this.getSession(userKey);
+    return this.cleanNum(session.runningTotal);
+  }
+
+  /** Removes the last history entry and rolls back the running total. */
+  async undo(groupIdOrChat: string, maybeUserId?: string): Promise<{
+    undone: boolean;
+    previousTotal: number;
+    newTotal: number;
+    formatted: string;
+  }> {
+    const userKey = this.resolveUserKey(groupIdOrChat, maybeUserId);
+    const session = await this.getSession(userKey);
+    if (session.history.length === 0) {
+      return {
+        undone: false,
+        previousTotal: session.runningTotal,
+        newTotal: session.runningTotal,
+        formatted: 'No entries to undo.',
+      };
+    }
+
+    const lastEntry = session.history.pop()!;
+    const prevTotal = session.runningTotal;
+    const restoredTotal = session.history.length > 0
+      ? session.history[session.history.length - 1].totalAfter
+      : 0;
+    session.runningTotal = restoredTotal;
+    await this.saveSession(session);
+
+    return {
+      undone: true,
+      previousTotal: prevTotal,
+      newTotal: restoredTotal,
+      formatted: ↩️ Undo\nbefore：\nremoved：\ntotal：,
+    };
+  }
+
+  /** Deletes the session entirely (hard reset to 0). */
+  async clear(groupIdOrChat: string, maybeUserId?: string): Promise<{
+    before: number;
+    now: string;
+    total: number;
+    formatted: string;
+  }> {
+    const userKey = this.resolveUserKey(groupIdOrChat, maybeUserId);
+    const session = await this.getSession(userKey);
+    const before = session.runningTotal;
+    const db = await this.getDb();
+    await db.query('DELETE FROM calculator_sessions WHERE session_key = ', [userKey]);
+
+    const formatted = efore：\nnow：reset=0\ntotal：0;
+    return { before, now: 'reset=0', total: 0, formatted };
+  }
+}
+
+================================================================================
+D. COMMAND HANDLER SERVICE — CALCULATOR-RELATED EXCERPTS
+================================================================================
+
+── FILE: src/core/services/CommandHandlerService.ts (relevant sections) ────────
+
+  // In handleCommand():
+
+  // ── SAFETY GUARD (top of handleCommand) ─────────────────────────────────────
+  const trimmed = text.trim();
+  // Safety: If message starts with '#' or contains email, it is NEVER a command
+  if (trimmed.startsWith('#') || /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(trimmed)) {
+    return;
+  }
+
+  // ── ARITHMETIC SHORTHAND DETECTION ──────────────────────────────────────────
+  const parts = trimmed.split(' ');
+  const rawCmd = parts[0].toLowerCase();
+  const isExplicitSlash = rawCmd.startsWith('/');
+  const cleanCmd = isExplicitSlash ? rawCmd.split('@')[0] : '';
+
+  let cmdName = cleanCmd;
+  let expr = text;
+  let def = isExplicitSlash ? COMMAND_REGISTRY.find(c => c.cmd === cmdName) : undefined;
+
+  let isCalcShortcut = false;
+  if (!def) {
+    if (SafeMath.isArithmeticShorthand(text)) {
+      isCalcShortcut = true;
+    }
+  }
+
+  if (isCalcShortcut) {
+    cmdName = '/calc';
+    def = COMMAND_REGISTRY.find(c => c.cmd === '/calc');
+    expr = text.trim();                          // full text becomes the expression
+  } else if (cmdName === '/calc') {
+    expr = parts.slice(1).join(' ').trim();      // strip /calc prefix
+  }
+
+  if (!def && !isCalcShortcut) {
+    if (trimmed.startsWith('/')) {
+      await sendMessage(chatId, 'Unknown command. Use /help to see available commands.', messageId);
+    }
+    return;
+  }
+
+  // ── CALCULATOR COMMAND CASES ─────────────────────────────────────────────────
+  case '/calc':
+    if (!expr) {
+      await sendMessage(chatId, "Please provide an expression. Example: /calc 50 * 2", messageId);
+      return;
+    }
+    const calcRes = await this.calculatorService.processExpression(chatId, fromId, expr);
+    await sendMessage(chatId, calcRes.formatted, messageId);
+    // Telegram reply: "before：78\nnow：+89=89\ntotal：167"
+    break;
+
+  case '/total':
+    const tot = await this.calculatorService.getTotal(chatId, fromId);
+    await sendMessage(chatId, 	otal：, messageId);
+    break;
+
+  case '/undo':
+    const undoRes = await this.calculatorService.undo(chatId, fromId);
+    await sendMessage(chatId, undoRes.formatted, messageId);
+    // Telegram reply: "↩️ Undo\nbefore：167\nremoved：89\ntotal：78"
+    break;
+
+  case '/clearcalc':
+  case '/reset':
+    const resetRes = await this.calculatorService.clear(chatId, fromId);
+    await sendMessage(chatId, resetRes.formatted, messageId);
+    // Telegram reply: "before：167\nnow：reset=0\ntotal：0"
+    break;
+
+================================================================================
+E. COMMAND REGISTRY — CALCULATOR COMMANDS
+================================================================================
+
+── FILE: src/core/services/CommandRegistry.ts (calculator entries) ─────────────
+
+  { cmd: '/calc',      category: 'OWNER_STAFF_UTILITY', desc: 'Calculate math expression',        role: 'Owner/Staff', enabled: true, classification: 'FUNCTIONAL',  botFatherVisible: false },
+  { cmd: '/total',     category: 'OWNER_STAFF_UTILITY', desc: 'Show current session running total', role: 'Owner/Staff', enabled: true, classification: 'READ-ONLY',  botFatherVisible: false },
+  { cmd: '/undo',      category: 'OWNER_STAFF_UTILITY', desc: 'Undo last calculation step',        role: 'Owner/Staff', enabled: true, classification: 'FUNCTIONAL',  botFatherVisible: false },
+  { cmd: '/clearcalc', category: 'OWNER_STAFF_UTILITY', desc: 'Clear running total',               role: 'Owner/Staff', enabled: true, classification: 'FUNCTIONAL',  botFatherVisible: false },
+  { cmd: '/reset',     category: 'OWNER_STAFF_UTILITY', desc: 'Reset calculator session',          role: 'Owner/Staff', enabled: true, classification: 'FUNCTIONAL',  botFatherVisible: false },
+
+  // COMMAND_REQUIRED_PERMISSIONS (calculator):
+  '/calc':      ['order.process'],
+  '/total':     ['order.process'],
+  '/undo':      ['order.process'],
+  '/clearcalc': ['order.process'],
+  '/reset':     ['order.process'],
+
+================================================================================
+F. WEBHOOK ROUTER — ARITHMETIC SHORT-CIRCUIT
+================================================================================
+
+── FILE: src/server/index.ts — Telegram Webhook Handler (lines ~3435–3485) ─────
+
+  // ── ROLE CHECK ────────────────────────────────────────────────────────────────
+  const authCtx = await services.authService.getUserContextByTelegramId(actorTelegramUserId);
+  const isOwnerOrStaff = !!(authCtx && (authCtx.role === 'OWNER' || authCtx.role === 'STAFF'));
+
+  let candidateCmd = '';
+  let isCommandOrCalc = false;
+
+  // Order messages NEVER enter command/calc routing
+  const isOrderMessage = shouldRouteToOrderParser(rawText) || shouldRouteToOrderParser(rawCaption);
+
+  // ── TEXT MESSAGE ROUTING ──────────────────────────────────────────────────────
+  if (!isOrderMessage && rawText) {
+    if (rawText.startsWith('/')) {
+      candidateCmd = rawText;
+      isCommandOrCalc = true;
+    } else if (SafeMath.isArithmeticShorthand(rawText) && isOwnerOrStaff) {
+      // e.g. "+89", "78", "2+2" typed by Owner or Staff → calculator shorthand
+      candidateCmd = rawText;
+      isCommandOrCalc = true;
+    }
+  }
+
+  // ── CAPTION ROUTING (photo with arithmetic caption) ───────────────────────────
+  if (!isOrderMessage && !isCommandOrCalc && rawCaption && isOwnerOrStaff) {
+    if (rawCaption.startsWith('/')) {
+      candidateCmd = rawCaption;
+      isCommandOrCalc = true;
+    } else if (SafeMath.isArithmeticShorthand(rawCaption)) {
+      // e.g. photo with caption "+67" → staff submitting amount
+      candidateCmd = rawCaption;
+      isCommandOrCalc = true;
+    }
+  }
+
+  // ── DISPATCH ──────────────────────────────────────────────────────────────────
+  if (isCommandOrCalc && candidateCmd) {
+    console.log([Telegram Command] Dispatching cmd="" actor="" chat="");
+    await services.commandHandlerService.handleCommand(
+      groupChatId,
+      actorTelegramUserId,   // fromId — used as session_key
+      candidateCmd,
+      messageId,
+      async (cId, txt, replyTo, replyMarkup, parseMode) => {
+        await telegram.sendMessage({
+          chatId: cId,
+          text: txt,
+          replyToMessageId: replyTo,
+          replyMarkup,
+          parseMode: parseMode || 'HTML',
+        });
+      }
+    );
+    return;   // ← short-circuits: never reaches order parser
+  }
+
+── FILE: src/server/index.ts — REST API Routes (lines ~2000–2012) ──────────────
+
+  // Calculator REST API (used by Dashboard UI)
+  app.post('/api/calculator/calculate', async (req, res) => {
+    const { groupId, userId, expression } = req.body;
+    const result = await services.calculatorService.processExpression(
+      groupId || 'global',
+      userId || 'user',
+      expression
+    );
+    res.json(result);
+    // Response: { before, now, total, formatted, evalResult }
+  });
+
+  app.post('/api/calculator/undo', async (req, res) => {
+    const { groupId, userId } = req.body;
+    const result = await services.calculatorService.undo(groupId || 'global', userId || 'user');
+    res.json(result);
+    // Response: { undone, previousTotal, newTotal, formatted }
+  });
+
+================================================================================
+G. UNIT TESTS
+================================================================================
+
+── FILE: src/tests/unit/CalculatorService.test.ts ──────────────────────────────
+
+  Tests verified:
+  1. 2+2 → evalResult=4, total=4; session_key is user ID, not group chat ID
+  2. Chaining: 2+2 → total=4, then +69 → total=73
+  3. Undo: after 2+2 and +69, undo removes +69, restores total to 4
+  4. Clear/reset: formatted = "before：4\nnow：reset=0\ntotal：0"; getTotal returns "0"
+  5. Live sequence:
+       /reset → "before：0\nnow：reset=0\ntotal：0"
+       78     → "before：0\nnow：+78=78\ntotal：78"
+       +67    → "before：78\nnow：+67=67\ntotal：145"
+       2+2    → "before：145\nnow：+2+2=4\ntotal：149"
+       /reset → "before：149\nnow：reset=0\ntotal：0"
+
+  SafeMath.isArithmeticShorthand tests:
+  ✓ +69, -10, 2+2, 100-25, 5*4, 100/2, 78, 100, 74.5, 123456 → true
+  ✗ "100 CP", "hello", "/calc 2+2", "2+" → false
+
+── FILE: src/tests/unit/webhook_arithmetic_shortcircuit.test.ts ────────────────
+
+  Tests verified:
+  ✓ OWNER sending "2+2"  → short-circuits to calculator
+  ✓ OWNER sending "+69"  → short-circuits to calculator
+  ✗ CUSTOMER sending "2+2" → does NOT short-circuit (reaches order parser)
+  ✓ OWNER sending plain "78" → short-circuits to calculator
+  ✓ STAFF sending photo with caption "+67" → short-circuits to calculator
+  ✗ CUSTOMER sending photo with caption "+67" → does NOT short-circuit
+  ✗ "100 CP Facebook" → does NOT short-circuit (order text, reaches order parser)
+
+================================================================================
+END OF CALCULATOR_WORKFLOW.txt
+================================================================================
