@@ -1,6 +1,6 @@
-import { getDb, runMigrations, resetDb } from './core/db/index.js';
+import { getDb, runMigrations, resetDb } from './core/db/index.ts';
 import { createServices } from './server/index.js';
-import { seedStagingData } from './core/db/seedStaging.js';
+import { seedStagingData } from './core/db/seedStaging.ts';
 import * as dotenv from 'dotenv';
 dotenv.config();
 async function run() {

@@ -1,7 +1,7 @@
-﻿import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
-import { runMigrations } from '../../core/db/index.js';
-import { seedStagingData } from '../../core/db/seedStaging.js';
+import { runMigrations } from '../../core/db/index.ts';
+import { seedStagingData } from '../../core/db/seedStaging.ts';
 
 describe('seedStagingData', () => {
   it('seeds staging data without 22P02 uuid syntax error', async () => {

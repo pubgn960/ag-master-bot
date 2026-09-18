@@ -1,4 +1,4 @@
-import { getDb } from './core/db/index.js';
+import { getDb } from './core/db/index.ts';
 import { v4 as uuidv4, v5 as uuidv5 } from 'uuid';
 
 const NAMESPACE = '1b671a64-40d5-491e-99b0-da01ff1f3341'; 

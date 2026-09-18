@@ -1,4 +1,4 @@
-import { getDb } from './core/db/index.js';
+import { getDb } from './core/db/index.ts';
 
 async function run() {
   const db = await getDb();

@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { getDb } from '../core/db/index.js';
+import { getDb } from '../core/db/index.ts';
 
 export const phaseERouter = Router();
 
