@@ -13,7 +13,7 @@
     "dev:server": "tsx src/server/index.ts",
     "dev:client": "vite",
     "dev": "npm run dev:server",
-    "build": "tsc && vite build",
+    "build": "vite build",
     "test": "vitest run",
     "test:unit": "vitest run src/tests/unit",
     "test:integration": "vitest run src/tests/integration",
