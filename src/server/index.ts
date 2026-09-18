@@ -4290,6 +4290,30 @@ export function createApp(services: AppServices): express.Application {
       }
     });
 
+    app.all('/api/webhooks/sync-commands', async (req: Request, res: Response) => {
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      if (!token) return res.status(500).json({ error: 'TELEGRAM_BOT_TOKEN is not configured.' });
+
+      try {
+        const menuCmds = COMMAND_REGISTRY
+          .filter((c) => c.enabled)
+          .map((c) => ({
+            command: c.cmd.replace(/^\//, '').toLowerCase(),
+            description: c.desc.slice(0, 256),
+          }));
+
+        const cmdRes = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ commands: menuCmds }),
+        });
+        const data: any = await cmdRes.json();
+        return res.json({ count: menuCmds.length, telegramResponse: data });
+      } catch (err: any) {
+        return res.status(500).json({ error: err.message });
+      }
+    });
+
     app.post('/api/webhooks/telegram', async (req: Request, res: Response) => {
       // ─── Top-level error boundary: nothing inside should ever crash the process ───
       let _ackSent = false;
@@ -8389,6 +8413,26 @@ export async function startServer(port: number = 3000): Promise<{ app: express.A
           });
           const setData: any = await setRes.json();
           console.log(`[TELEGRAM SET_WEBHOOK RESULT] ok=${setData.ok} description="${setData.description || ''}" url="${targetWebhookUrl}"`);
+        }
+
+        // Automatically sync slash commands menu with Telegram API (for '/' autocomplete menu)
+        try {
+          const menuCmds = COMMAND_REGISTRY
+            .filter((c) => c.enabled)
+            .map((c) => ({
+              command: c.cmd.replace(/^\//, '').toLowerCase(),
+              description: c.desc.slice(0, 256),
+            }));
+
+          const cmdRes = await fetch(`https://api.telegram.org/bot${botToken}/setMyCommands`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ commands: menuCmds }),
+          });
+          const cmdData: any = await cmdRes.json();
+          console.log(`[TELEGRAM SET_MY_COMMANDS RESULT] ok=${cmdData.ok} count=${menuCmds.length}`);
+        } catch (cmdErr: any) {
+          console.warn('[TELEGRAM SET_MY_COMMANDS WARNING]', cmdErr.message);
         }
 
         const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`);
